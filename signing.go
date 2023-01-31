@@ -3,13 +3,14 @@ package httpsig
 import (
 	"bytes"
 	"crypto"
-	"crypto/rand"
 	"encoding/base64"
 	"fmt"
 	"net/http"
 	"net/textproto"
 	"strconv"
 	"strings"
+
+	"golang.org/x/crypto/ssh"
 )
 
 const (
@@ -39,10 +40,15 @@ const (
 
 var defaultHeaders = []string{dateHeader}
 
-var _ Signer = &macSigner{}
-
-type macSigner struct {
-	m            macer
+// Signers will sign HTTP requests or responses based on the algorithms and
+// headers selected at creation time.
+//
+// Signers are not safe to use between multiple goroutines.
+//
+// Note that signatures do set the deprecated 'algorithm' parameter for
+// backwards compatibility.
+type Signer struct {
+	method       SigningMethod
 	makeDigest   bool
 	dAlgo        DigestAlgorithm
 	headers      []string
@@ -52,50 +58,146 @@ type macSigner struct {
 	expires      int64
 }
 
-func (m *macSigner) SignRequest(pKey crypto.PrivateKey, pubKeyId string, r *http.Request, body []byte) error {
+// NewHTTPSigner creates a new Signer with the provided algorithm preferences to
+// make HTTP signatures. Only the first available algorithm will be used, which
+// is returned by this function along with the Signer. If none of the preferred
+// algorithms were available, then the default algorithm is used. The headers
+// specified will be included into the HTTP signatures.
+//
+// The Digest will also be calculated on a request's body using the provided
+// digest algorithm, if "Digest" is one of the headers listed.
+//
+// The provided scheme determines which header is populated with the HTTP
+// Signature.
+//
+// An error is returned if an unknown or a known cryptographically insecure
+// Algorithm is provided.
+func NewHTTPSigner(
+	prefs []Algorithm,
+	dAlgo DigestAlgorithm,
+	headers []string,
+	scheme SignatureScheme,
+	expiresIn int64,
+) (*Signer, Algorithm, error) {
+	for _, pref := range prefs {
+		s, err := newSigner(pref, dAlgo, headers, scheme, expiresIn)
+		if err != nil {
+			continue
+		}
+		return s, pref, err
+	}
+	s, err := newSigner(defaultAlgorithm, dAlgo, headers, scheme, expiresIn)
+	return s, defaultAlgorithm, err
+}
+
+// NewwSSHSigner creates a new Signer using the specified ssh.Signer
+// At the moment only ed25519 ssh keys are supported.
+// The headers specified will be included into the HTTP signatures.
+//
+// The Digest will also be calculated on a request's body using the provided
+// digest algorithm, if "Digest" is one of the headers listed.
+//
+// The provided scheme determines which header is populated with the HTTP
+// Signature.
+func NewSSHSigner(s ssh.Signer, dAlgo DigestAlgorithm, headers []string, scheme SignatureScheme, expiresIn int64) (SSHSigner, Algorithm, error) {
+	sshAlgo := getSSHAlgorithm(s.PublicKey().Type())
+	if sshAlgo == "" {
+		return nil, "", fmt.Errorf("key type: %s not supported yet", s.PublicKey().Type())
+	}
+
+	signer, err := newSSHSigner(s, sshAlgo, dAlgo, headers, scheme, expiresIn)
+	if err != nil {
+		return nil, "", err
+	}
+
+	return signer, sshAlgo, nil
+}
+
+// SignRequest signs the request using a private key. The public key id
+// is used by the HTTP server to identify which key to use to verify the
+// signature.
+//
+// If the Signer was created using a MAC based algorithm, then the key
+// is expected to be of type []byte. If the Signer was created using an
+// RSA based algorithm, then the private key is expected to be of type
+// *rsa.PrivateKey.
+//
+// A Digest (RFC 3230) will be added to the request. The body provided
+// must match the body used in the request, and is allowed to be nil.
+// The Digest ensures the request body is not tampered with in flight,
+// and if the signer is created to also sign the "Digest" header, the
+// HTTP Signature will then ensure both the Digest and body are not both
+// modified to maliciously represent different content.
+func (s *Signer) SignRequest(
+	pKey crypto.PrivateKey,
+	pubKeyId string,
+	r *http.Request,
+	body []byte,
+) error {
 	if body != nil {
-		err := addDigest(r, m.dAlgo, body)
+		err := addDigest(r, s.dAlgo, body)
 		if err != nil {
 			return err
 		}
 	}
-	s, err := m.signatureString(r)
+	data, err := s.signatureString(r)
 	if err != nil {
 		return err
 	}
-	enc, err := m.signSignature(pKey, s)
+	enc, err := s.signSignature(pKey, data)
 	if err != nil {
 		return err
 	}
-	setSignatureHeader(r.Header, string(m.targetHeader), m.prefix, pubKeyId, m.m.String(), enc, m.headers, m.created, m.expires)
+
+	setSignatureHeader(
+		r.Header,
+		string(s.targetHeader),
+		s.prefix,
+		pubKeyId,
+		s.method.String(),
+		enc,
+		s.headers,
+		s.created,
+		s.expires)
 	return nil
 }
 
-func (m *macSigner) SignResponse(pKey crypto.PrivateKey, pubKeyId string, r http.ResponseWriter, body []byte) error {
+// SignResponse signs the response using a private key. The public key
+// id is used by the HTTP client to identify which key to use to verify
+// the signature.
+//
+// If the Signer was created using a MAC based algorithm, then the key
+// is expected to be of type []byte. If the Signer was created using an
+// RSA based algorithm, then the private key is expected to be of type
+// *rsa.PrivateKey.
+//
+// A Digest (RFC 3230) will be added to the response. The body provided
+// must match the body written in the response, and is allowed to be
+// nil. The Digest ensures the response body is not tampered with in
+// flight, and if the signer is created to also sign the "Digest"
+// header, the HTTP Signature will then ensure both the Digest and body
+// are not both modified to maliciously represent different content.
+func (s *Signer) SignResponse(pKey crypto.PrivateKey, pubKeyId string, r http.ResponseWriter, body []byte) error {
 	if body != nil {
-		err := addDigestResponse(r, m.dAlgo, body)
+		err := addDigestResponse(r, s.dAlgo, body)
 		if err != nil {
 			return err
 		}
 	}
-	s, err := m.signatureStringResponse(r)
+	data, err := s.signatureStringResponse(r)
 	if err != nil {
 		return err
 	}
-	enc, err := m.signSignature(pKey, s)
+	enc, err := s.signSignature(pKey, data)
 	if err != nil {
 		return err
 	}
-	setSignatureHeader(r.Header(), string(m.targetHeader), m.prefix, pubKeyId, m.m.String(), enc, m.headers, m.created, m.expires)
+	setSignatureHeader(r.Header(), string(s.targetHeader), s.prefix, pubKeyId, s.method.String(), enc, s.headers, s.created, s.expires)
 	return nil
 }
 
-func (m *macSigner) signSignature(pKey crypto.PrivateKey, s string) (string, error) {
-	pKeyBytes, ok := pKey.([]byte)
-	if !ok {
-		return "", fmt.Errorf("private key for MAC signing must be of type []byte")
-	}
-	sig, err := m.m.Sign([]byte(s), pKeyBytes)
+func (s *Signer) signSignature(pKey crypto.PrivateKey, data string) (string, error) {
+	sig, err := s.method.Sign(pKey, []byte(data))
 	if err != nil {
 		return "", err
 	}
@@ -103,94 +205,28 @@ func (m *macSigner) signSignature(pKey crypto.PrivateKey, s string) (string, err
 	return enc, nil
 }
 
-func (m *macSigner) signatureString(r *http.Request) (string, error) {
-	return signatureString(r.Header, m.headers, addRequestTarget(r), m.created, m.expires)
+func (s *Signer) signatureString(r *http.Request) (string, error) {
+	return signatureString(
+		r.Header, s.headers, addRequestTarget(r), s.created, s.expires)
 }
 
-func (m *macSigner) signatureStringResponse(r http.ResponseWriter) (string, error) {
-	return signatureString(r.Header(), m.headers, requestTargetNotPermitted, m.created, m.expires)
-}
-
-var _ Signer = &asymmSigner{}
-
-type asymmSigner struct {
-	s            signer
-	makeDigest   bool
-	dAlgo        DigestAlgorithm
-	headers      []string
-	targetHeader SignatureScheme
-	prefix       string
-	created      int64
-	expires      int64
-}
-
-func (a *asymmSigner) SignRequest(pKey crypto.PrivateKey, pubKeyId string, r *http.Request, body []byte) error {
-	if body != nil {
-		err := addDigest(r, a.dAlgo, body)
-		if err != nil {
-			return err
-		}
-	}
-	s, err := a.signatureString(r)
-	if err != nil {
-		return err
-	}
-	enc, err := a.signSignature(pKey, s)
-	if err != nil {
-		return err
-	}
-	setSignatureHeader(r.Header, string(a.targetHeader), a.prefix, pubKeyId, a.s.String(), enc, a.headers, a.created, a.expires)
-	return nil
-}
-
-func (a *asymmSigner) SignResponse(pKey crypto.PrivateKey, pubKeyId string, r http.ResponseWriter, body []byte) error {
-	if body != nil {
-		err := addDigestResponse(r, a.dAlgo, body)
-		if err != nil {
-			return err
-		}
-	}
-	s, err := a.signatureStringResponse(r)
-	if err != nil {
-		return err
-	}
-	enc, err := a.signSignature(pKey, s)
-	if err != nil {
-		return err
-	}
-	setSignatureHeader(r.Header(), string(a.targetHeader), a.prefix, pubKeyId, a.s.String(), enc, a.headers, a.created, a.expires)
-	return nil
-}
-
-func (a *asymmSigner) signSignature(pKey crypto.PrivateKey, s string) (string, error) {
-	sig, err := a.s.Sign(rand.Reader, pKey, []byte(s))
-	if err != nil {
-		return "", err
-	}
-	enc := base64.StdEncoding.EncodeToString(sig)
-	return enc, nil
-}
-
-func (a *asymmSigner) signatureString(r *http.Request) (string, error) {
-	return signatureString(r.Header, a.headers, addRequestTarget(r), a.created, a.expires)
-}
-
-func (a *asymmSigner) signatureStringResponse(r http.ResponseWriter) (string, error) {
-	return signatureString(r.Header(), a.headers, requestTargetNotPermitted, a.created, a.expires)
+func (s *Signer) signatureStringResponse(r http.ResponseWriter) (string, error) {
+	return signatureString(
+		r.Header(), s.headers, requestTargetNotPermitted, s.created, s.expires)
 }
 
 var _ SSHSigner = &asymmSSHSigner{}
 
 type asymmSSHSigner struct {
-	*asymmSigner
+	*Signer
 }
 
 func (a *asymmSSHSigner) SignRequest(pubKeyId string, r *http.Request, body []byte) error {
-	return a.asymmSigner.SignRequest(nil, pubKeyId, r, body)
+	return a.Signer.SignRequest(nil, pubKeyId, r, body)
 }
 
 func (a *asymmSSHSigner) SignResponse(pubKeyId string, r http.ResponseWriter, body []byte) error {
-	return a.asymmSigner.SignResponse(nil, pubKeyId, r, body)
+	return a.Signer.SignResponse(nil, pubKeyId, r, body)
 }
 
 func setSignatureHeader(h http.Header, targetHeader, prefix, pubKeyId, algo, enc string, headers []string, created int64, expires int64) {

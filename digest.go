@@ -14,7 +14,12 @@ type DigestAlgorithm string
 
 const (
 	DigestSha256 DigestAlgorithm = "SHA-256"
-	DigestSha512                 = "SHA-512"
+	DigestSha512 DigestAlgorithm = "SHA-512"
+)
+
+const (
+	digestHeader = "Digest"
+	digestDelim  = "="
 )
 
 var digestToDef = map[DigestAlgorithm]crypto.Hash{
@@ -43,11 +48,6 @@ func getHash(alg DigestAlgorithm) (h hash.Hash, toUse DigestAlgorithm, err error
 	}
 	return
 }
-
-const (
-	digestHeader = "Digest"
-	digestDelim  = "="
-)
 
 func addDigest(r *http.Request, algo DigestAlgorithm, b []byte) (err error) {
 	_, ok := r.Header[digestHeader]

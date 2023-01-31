@@ -288,7 +288,7 @@ func toHeaderSignatureParameters(k string, vals []string) string {
 
 func TestSignerRequest(t *testing.T) {
 	testFn := func(t *testing.T, test httpsigTest) {
-		s, a, err := NewSigner(test.prefs, test.digestAlg, test.headers, test.scheme, 0)
+		s, a, err := NewHTTPSigner(test.prefs, test.digestAlg, test.headers, test.scheme, 0)
 		if err != nil {
 			t.Fatalf("%s", err)
 		}
@@ -342,7 +342,7 @@ func TestSignerRequest(t *testing.T) {
 
 func TestSignerResponse(t *testing.T) {
 	testFn := func(t *testing.T, test httpsigTest) {
-		s, _, err := NewSigner(test.prefs, test.digestAlg, test.headers, test.scheme, 0)
+		s, _, err := NewHTTPSigner(test.prefs, test.digestAlg, test.headers, test.scheme, 0)
 		// Test response signing
 		resp := httptest.NewRecorder()
 		resp.HeaderMap.Set("Date", testDate)
@@ -417,7 +417,7 @@ func TestNewSignerRequestMissingHeaders(t *testing.T) {
 	for _, test := range failingTests {
 		t.Run(test.name, func(t *testing.T) {
 			test := test
-			s, a, err := NewSigner(test.prefs, test.digestAlg, test.headers, test.scheme, 0)
+			s, a, err := NewHTTPSigner(test.prefs, test.digestAlg, test.headers, test.scheme, 0)
 			if err != nil {
 				t.Fatalf("%s", err)
 			}
@@ -465,7 +465,7 @@ func TestNewSignerResponseMissingHeaders(t *testing.T) {
 	for _, test := range failingTests {
 		t.Run(test.name, func(t *testing.T) {
 			test := test
-			s, a, err := NewSigner(test.prefs, test.digestAlg, test.headers, test.scheme, 0)
+			s, a, err := NewHTTPSigner(test.prefs, test.digestAlg, test.headers, test.scheme, 0)
 			if err != nil {
 				t.Fatalf("%s", err)
 			}
@@ -496,7 +496,7 @@ func TestNewVerifier(t *testing.T) {
 			if test.body == nil {
 				req.Header.Set("Digest", testDigest)
 			}
-			s, _, err := NewSigner(test.prefs, test.digestAlg, test.headers, test.scheme, 0)
+			s, _, err := NewHTTPSigner(test.prefs, test.digestAlg, test.headers, test.scheme, 0)
 			if err != nil {
 				t.Fatalf("%s", err)
 			}
@@ -533,7 +533,7 @@ func TestNewResponseVerifier(t *testing.T) {
 			if test.body == nil {
 				resp.HeaderMap.Set("Digest", testDigest)
 			}
-			s, _, err := NewSigner(test.prefs, test.digestAlg, test.headers, test.scheme, 0)
+			s, _, err := NewHTTPSigner(test.prefs, test.digestAlg, test.headers, test.scheme, 0)
 			if err != nil {
 				t.Fatalf("%s", err)
 			}
@@ -605,7 +605,7 @@ func Test_Signing_HTTP_Messages_AppendixC(t *testing.T) {
 			r.Header["Content-Type"] = []string{"application/json"}
 			setDigest(r)
 
-			s, _, err := NewSigner([]Algorithm{RSA_SHA256}, DigestSha256, test.headers, Authorization, 0)
+			s, _, err := NewHTTPSigner([]Algorithm{RSA_SHA256}, DigestSha256, test.headers, Authorization, 0)
 			if err != nil {
 				t.Fatalf("error creating signer: %s", err)
 			}
@@ -668,7 +668,7 @@ func TestSigningEd25519(t *testing.T) {
 			r.Header["Content-Type"] = []string{"application/json"}
 			setDigest(r)
 
-			s, _, err := NewSigner([]Algorithm{ED25519}, DigestSha256, test.headers, Authorization, 0)
+			s, _, err := NewHTTPSigner([]Algorithm{ED25519}, DigestSha256, test.headers, Authorization, 0)
 			if err != nil {
 				t.Fatalf("error creating signer: %s", err)
 			}

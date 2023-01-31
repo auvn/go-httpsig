@@ -4,16 +4,15 @@ import (
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha1"
 	"crypto/sha256"
 	"crypto/sha512"
 	"crypto/subtle" // Use should trigger great care
-	"encoding/asn1"
 	"errors"
 	"fmt"
 	"hash"
-	"io"
 	"math/big"
 	"strings"
 
@@ -125,54 +124,57 @@ func isForbiddenHash(h crypto.Hash) bool {
 	return false
 }
 
-// signer is an internally public type.
-type signer interface {
-	Sign(rand io.Reader, p crypto.PrivateKey, sig []byte) ([]byte, error)
-	Verify(pub crypto.PublicKey, toHash, signature []byte) error
-	String() string
-}
-
-// macer is an internally public type.
-type macer interface {
-	Sign(sig, key []byte) ([]byte, error)
-	Equal(sig, actualMAC, key []byte) (bool, error)
-	String() string
-}
-
-var _ macer = &hmacAlgorithm{}
+var _ SigningMethod = &hmacAlgorithm{}
 
 type hmacAlgorithm struct {
 	fn   func(key []byte) (hash.Hash, error)
 	kind crypto.Hash
 }
 
-func (h *hmacAlgorithm) Sign(sig, key []byte) ([]byte, error) {
-	hs, err := h.fn(key)
-	if err = setSig(hs, sig); err != nil {
+func (h *hmacAlgorithm) Sign(key interface{}, data []byte) ([]byte, error) {
+	keyb, ok := key.([]byte)
+	if !ok {
+		return nil, errors.New("key is not a slice of bytes")
+	}
+	hs, err := h.fn(keyb)
+	if err != nil {
+		return nil, err
+	}
+
+	if err = setSig(hs, data); err != nil {
 		return nil, err
 	}
 	return hs.Sum(nil), nil
 }
 
-func (h *hmacAlgorithm) Equal(sig, actualMAC, key []byte) (bool, error) {
-	hs, err := h.fn(key)
+func (h *hmacAlgorithm) Verify(key interface{}, data, signature []byte) error {
+	keyb, ok := key.([]byte)
+	if !ok {
+		return errors.New("key is not a slice of bytes")
+	}
+
+	hs, err := h.fn(keyb)
 	if err != nil {
-		return false, err
+		return err
 	}
 	defer hs.Reset()
-	err = setSig(hs, sig)
+	err = setSig(hs, data)
 	if err != nil {
-		return false, err
+		return err
 	}
 	expected := hs.Sum(nil)
-	return hmac.Equal(actualMAC, expected), nil
+	if hmac.Equal(signature, expected) {
+		return nil
+	}
+
+	return ErrInvalidSignature
 }
 
 func (h *hmacAlgorithm) String() string {
 	return fmt.Sprintf("%s-%s", hmacPrefix, hashToDef[h.kind].name)
 }
 
-var _ signer = &rsaAlgorithm{}
+var _ SigningMethod = &rsaAlgorithm{}
 
 type rsaAlgorithm struct {
 	hash.Hash
@@ -192,9 +194,9 @@ func (r *rsaAlgorithm) setSig(b []byte) error {
 	return nil
 }
 
-func (r *rsaAlgorithm) Sign(rand io.Reader, p crypto.PrivateKey, sig []byte) ([]byte, error) {
+func (r *rsaAlgorithm) Sign(key interface{}, data []byte) ([]byte, error) {
 	if r.sshSigner != nil {
-		sshsig, err := r.sshSigner.Sign(rand, sig)
+		sshsig, err := r.sshSigner.Sign(rand.Reader, data)
 		if err != nil {
 			return nil, err
 		}
@@ -203,23 +205,23 @@ func (r *rsaAlgorithm) Sign(rand io.Reader, p crypto.PrivateKey, sig []byte) ([]
 	}
 	defer r.Reset()
 
-	if err := r.setSig(sig); err != nil {
+	if err := r.setSig(data); err != nil {
 		return nil, err
 	}
-	rsaK, ok := p.(*rsa.PrivateKey)
+	rsaK, ok := key.(*rsa.PrivateKey)
 	if !ok {
-		return nil, errors.New("crypto.PrivateKey is not *rsa.PrivateKey")
+		return nil, errors.New("key is not *rsa.PrivateKey")
 	}
-	return rsa.SignPKCS1v15(rand, rsaK, r.kind, r.Sum(nil))
+	return rsa.SignPKCS1v15(rand.Reader, rsaK, r.kind, r.Sum(nil))
 }
 
-func (r *rsaAlgorithm) Verify(pub crypto.PublicKey, toHash, signature []byte) error {
+func (r *rsaAlgorithm) Verify(key interface{}, data, signature []byte) error {
 	defer r.Reset()
-	rsaK, ok := pub.(*rsa.PublicKey)
+	rsaK, ok := key.(*rsa.PublicKey)
 	if !ok {
-		return errors.New("crypto.PublicKey is not *rsa.PublicKey")
+		return errors.New("key is not *rsa.PublicKey")
 	}
-	if err := r.setSig(toHash); err != nil {
+	if err := r.setSig(data); err != nil {
 		return err
 	}
 	return rsa.VerifyPKCS1v15(rsaK, r.kind, r.Sum(nil), signature)
@@ -229,35 +231,35 @@ func (r *rsaAlgorithm) String() string {
 	return fmt.Sprintf("%s-%s", rsaPrefix, hashToDef[r.kind].name)
 }
 
-var _ signer = &ed25519Algorithm{}
+var _ SigningMethod = &ed25519Algorithm{}
 
 type ed25519Algorithm struct {
 	sshSigner ssh.Signer
 }
 
-func (r *ed25519Algorithm) Sign(rand io.Reader, p crypto.PrivateKey, sig []byte) ([]byte, error) {
+func (r *ed25519Algorithm) Sign(key interface{}, data []byte) ([]byte, error) {
 	if r.sshSigner != nil {
-		sshsig, err := r.sshSigner.Sign(rand, sig)
+		sshsig, err := r.sshSigner.Sign(rand.Reader, data)
 		if err != nil {
 			return nil, err
 		}
 
 		return sshsig.Blob, nil
 	}
-	ed25519K, ok := p.(ed25519.PrivateKey)
+	ed25519K, ok := key.(ed25519.PrivateKey)
 	if !ok {
-		return nil, errors.New("crypto.PrivateKey is not ed25519.PrivateKey")
+		return nil, errors.New("key is not ed25519.PrivateKey")
 	}
-	return ed25519.Sign(ed25519K, sig), nil
+	return ed25519.Sign(ed25519K, data), nil
 }
 
-func (r *ed25519Algorithm) Verify(pub crypto.PublicKey, toHash, signature []byte) error {
-	ed25519K, ok := pub.(ed25519.PublicKey)
+func (r *ed25519Algorithm) Verify(key interface{}, data, signature []byte) error {
+	ed25519K, ok := key.(ed25519.PublicKey)
 	if !ok {
-		return errors.New("crypto.PublicKey is not ed25519.PublicKey")
+		return errors.New("key is not ed25519.PublicKey")
 	}
 
-	if ed25519.Verify(ed25519K, toHash, signature) {
+	if ed25519.Verify(ed25519K, data, signature) {
 		return nil
 	}
 
@@ -268,7 +270,7 @@ func (r *ed25519Algorithm) String() string {
 	return fmt.Sprintf("%s", ed25519Prefix)
 }
 
-var _ signer = &ecdsaAlgorithm{}
+var _ SigningMethod = &ecdsaAlgorithm{}
 
 type ecdsaAlgorithm struct {
 	hash.Hash
@@ -291,96 +293,101 @@ type ECDSASignature struct {
 	R, S *big.Int
 }
 
-func (r *ecdsaAlgorithm) Sign(rand io.Reader, p crypto.PrivateKey, sig []byte) ([]byte, error) {
+func (r *ecdsaAlgorithm) Sign(key interface{}, data []byte) ([]byte, error) {
 	defer r.Reset()
-	if err := r.setSig(sig); err != nil {
+	if err := r.setSig(data); err != nil {
 		return nil, err
 	}
-	ecdsaK, ok := p.(*ecdsa.PrivateKey)
+	ecdsaK, ok := key.(*ecdsa.PrivateKey)
 	if !ok {
-		return nil, errors.New("crypto.PrivateKey is not *ecdsa.PrivateKey")
-	}
-	R, S, err := ecdsa.Sign(rand, ecdsaK, r.Sum(nil))
-	if err != nil {
-		return nil, err
+		return nil, errors.New("key is not *ecdsa.PrivateKey")
 	}
 
-	signature := ECDSASignature{R: R, S: S}
-	bytes, err := asn1.Marshal(signature)
-
-	return bytes, err
+	return ecdsa.SignASN1(rand.Reader, ecdsaK, r.Sum(nil))
 }
 
-func (r *ecdsaAlgorithm) Verify(pub crypto.PublicKey, toHash, signature []byte) error {
+func (r *ecdsaAlgorithm) Verify(key interface{}, data, signature []byte) error {
 	defer r.Reset()
-	ecdsaK, ok := pub.(*ecdsa.PublicKey)
+	ecdsaK, ok := key.(*ecdsa.PublicKey)
 	if !ok {
 		return errors.New("crypto.PublicKey is not *ecdsa.PublicKey")
 	}
-	if err := r.setSig(toHash); err != nil {
+	if err := r.setSig(data); err != nil {
 		return err
 	}
 
-	sig := new(ECDSASignature)
-	_, err := asn1.Unmarshal(signature, sig)
-	if err != nil {
-		return err
-	}
-
-	if ecdsa.Verify(ecdsaK, r.Sum(nil), sig.R, sig.S) {
+	if ecdsa.VerifyASN1(ecdsaK, r.Sum(nil), signature) {
 		return nil
-	} else {
-		return errors.New("Invalid signature")
 	}
+
+	return errors.New("invalid signature")
 }
 
 func (r *ecdsaAlgorithm) String() string {
 	return fmt.Sprintf("%s-%s", ecdsaPrefix, hashToDef[r.kind].name)
 }
 
-var _ macer = &blakeMacAlgorithm{}
+var _ SigningMethod = &blakeMacAlgorithm{}
 
 type blakeMacAlgorithm struct {
 	fn   func(key []byte) (hash.Hash, error)
 	kind crypto.Hash
 }
 
-func (r *blakeMacAlgorithm) Sign(sig, key []byte) ([]byte, error) {
-	hs, err := r.fn(key)
+func (r *blakeMacAlgorithm) Sign(key interface{}, data []byte) ([]byte, error) {
+	keyb, ok := key.([]byte)
+	if !ok {
+		return nil, errors.New("key is not a slice of bytes")
+	}
+	hs, err := r.fn(keyb)
 	if err != nil {
 		return nil, err
 	}
-	if err = setSig(hs, sig); err != nil {
+
+	if err = setSig(hs, data); err != nil {
 		return nil, err
 	}
 	return hs.Sum(nil), nil
 }
 
-func (r *blakeMacAlgorithm) Equal(sig, actualMAC, key []byte) (bool, error) {
-	hs, err := r.fn(key)
+func (r *blakeMacAlgorithm) Verify(key interface{}, data, signature []byte) error {
+	keyb, ok := key.([]byte)
+	if !ok {
+		return errors.New("key is not a slice of bytes")
+	}
+	hs, err := r.fn(keyb)
 	if err != nil {
-		return false, err
+		return err
 	}
 	defer hs.Reset()
-	err = setSig(hs, sig)
+	err = setSig(hs, data)
 	if err != nil {
-		return false, err
+		return err
 	}
 	expected := hs.Sum(nil)
-	return subtle.ConstantTimeCompare(actualMAC, expected) == 1, nil
+	if subtle.ConstantTimeCompare(signature, expected) == 1 {
+		return nil
+	}
+
+	return ErrInvalidSignature
 }
 
 func (r *blakeMacAlgorithm) String() string {
 	return fmt.Sprintf("%s", hashToDef[r.kind].name)
 }
 
-func setSig(a hash.Hash, b []byte) error {
+func setSig(a hash.Hash, b []byte) (err error) {
+	defer func() {
+		if err != nil {
+			a.Reset()
+		}
+	}()
 	n, err := a.Write(b)
 	if err != nil {
-		a.Reset()
 		return err
-	} else if n != len(b) {
-		a.Reset()
+	}
+
+	if n != len(b) {
 		return fmt.Errorf("could only write %d of %d bytes of signature to hash", n, len(b))
 	}
 	return nil
@@ -440,7 +447,7 @@ func newAlgorithm(algo string, key []byte) (hash.Hash, crypto.Hash, error) {
 	return h, c, err
 }
 
-func signerFromSSHSigner(sshSigner ssh.Signer, s string) (signer, error) {
+func signerFromSSHSigner(sshSigner ssh.Signer, s string) (SigningMethod, error) {
 	switch {
 	case strings.HasPrefix(s, rsaPrefix):
 		return &rsaAlgorithm{
@@ -452,81 +459,5 @@ func signerFromSSHSigner(sshSigner ssh.Signer, s string) (signer, error) {
 		}, nil
 	default:
 		return nil, fmt.Errorf("no signer matching %q", s)
-	}
-}
-
-// signerFromString is an internally public method constructor
-func signerFromString(s string) (signer, error) {
-	s = strings.ToLower(s)
-	isEcdsa := false
-	isEd25519 := false
-	var algo string = ""
-	if strings.HasPrefix(s, ecdsaPrefix) {
-		algo = strings.TrimPrefix(s, ecdsaPrefix+"-")
-		isEcdsa = true
-	} else if strings.HasPrefix(s, rsaPrefix) {
-		algo = strings.TrimPrefix(s, rsaPrefix+"-")
-	} else if strings.HasPrefix(s, ed25519Prefix) {
-		isEd25519 = true
-		algo = "sha512"
-	} else {
-		return nil, fmt.Errorf("no signer matching %q", s)
-	}
-	hash, cHash, err := newAlgorithm(algo, nil)
-	if err != nil {
-		return nil, err
-	}
-	if isEd25519 {
-		return &ed25519Algorithm{}, nil
-	}
-	if isEcdsa {
-		return &ecdsaAlgorithm{
-			Hash: hash,
-			kind: cHash,
-		}, nil
-	}
-	return &rsaAlgorithm{
-		Hash: hash,
-		kind: cHash,
-	}, nil
-}
-
-// macerFromString is an internally public method constructor
-func macerFromString(s string) (macer, error) {
-	s = strings.ToLower(s)
-	if strings.HasPrefix(s, hmacPrefix) {
-		algo := strings.TrimPrefix(s, hmacPrefix+"-")
-		hashFn, cHash, err := newAlgorithmConstructor(algo)
-		if err != nil {
-			return nil, err
-		}
-		// Ensure below does not panic
-		_, err = hashFn(nil)
-		if err != nil {
-			return nil, err
-		}
-		return &hmacAlgorithm{
-			fn: func(key []byte) (hash.Hash, error) {
-				return hmac.New(func() hash.Hash {
-					h, e := hashFn(nil)
-					if e != nil {
-						panic(e)
-					}
-					return h
-				}, key), nil
-			},
-			kind: cHash,
-		}, nil
-	} else if bl, ok := stringToHash[s]; ok && blake2Algorithms[bl] {
-		hashFn, cHash, err := newAlgorithmConstructor(s)
-		if err != nil {
-			return nil, err
-		}
-		return &blakeMacAlgorithm{
-			fn:   hashFn,
-			kind: cHash,
-		}, nil
-	} else {
-		return nil, fmt.Errorf("no MACer matching %q", s)
 	}
 }

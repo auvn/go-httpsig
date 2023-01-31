@@ -1,7 +1,6 @@
 package httpsig
 
 import (
-	"crypto"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -11,9 +10,15 @@ import (
 	"time"
 )
 
-var _ Verifier = &verifier{}
-
-type verifier struct {
+// Verifier verifies HTTP Signatures.
+//
+// It will determine which of the supported headers has the parameters
+// that define the signature.
+//
+// Verifiers are not safe to use between multiple goroutines.
+//
+// Note that verification ignores the deprecated 'algorithm' parameter.
+type Verifier struct {
 	header      http.Header
 	kId         string
 	signature   string
@@ -23,7 +28,29 @@ type verifier struct {
 	sigStringFn func(http.Header, []string, int64, int64) (string, error)
 }
 
-func newVerifier(h http.Header, sigStringFn func(http.Header, []string, int64, int64) (string, error)) (*verifier, error) {
+// NewVerifier verifies the given request. It returns an error if the HTTP
+// Signature parameters are not present in any headers, are present in more than
+// one header, are malformed, or are missing required parameters. It ignores
+// unknown HTTP Signature parameters.
+func NewVerifier(r *http.Request) (*Verifier, error) {
+	h := r.Header
+	if _, hasHostHeader := h[hostHeader]; len(r.Host) > 0 && !hasHostHeader {
+		h[hostHeader] = []string{r.Host}
+	}
+	return newVerifier(h, func(h http.Header, toInclude []string, created int64, expires int64) (string, error) {
+		return signatureString(h, toInclude, addRequestTarget(r), created, expires)
+	})
+}
+
+// NewResponseVerifier verifies the given response. It returns errors under the
+// same conditions as NewVerifier.
+func NewResponseVerifier(r *http.Response) (*Verifier, error) {
+	return newVerifier(r.Header, func(h http.Header, toInclude []string, created int64, expires int64) (string, error) {
+		return signatureString(h, toInclude, requestTargetNotPermitted, created, expires)
+	})
+}
+
+func newVerifier(h http.Header, sigStringFn func(http.Header, []string, int64, int64) (string, error)) (*Verifier, error) {
 	scheme, s, err := getSignatureScheme(h)
 	if err != nil {
 		return nil, err
@@ -46,7 +73,7 @@ func newVerifier(h http.Header, sigStringFn func(http.Header, []string, int64, i
 	if err != nil {
 		return nil, err
 	}
-	return &verifier{
+	return &Verifier{
 		header:      h,
 		kId:         kId,
 		signature:   sig,
@@ -57,46 +84,31 @@ func newVerifier(h http.Header, sigStringFn func(http.Header, []string, int64, i
 	}, nil
 }
 
-func (v *verifier) KeyId() string {
+// KeyId gets the public key id that the signature is signed with.
+//
+// Note that the application is expected to determine the algorithm
+// used based on metadata or out-of-band information for this key id.
+func (v *Verifier) KeyId() string {
 	return v.kId
 }
 
-func (v *verifier) Verify(pKey crypto.PublicKey, algo Algorithm) error {
-	s, err := signerFromString(string(algo))
-	if err == nil {
-		return v.asymmVerify(s, pKey)
+// Verify accepts the public key specified by KeyId and returns an
+// error if verification fails or if the signature is malformed. The
+// algorithm must be the one used to create the signature in order to
+// pass verification. The algorithm is determined based on metadata or
+// out-of-band information for the key id.
+//
+// If the signature was created using a MAC based algorithm, then the
+// key is expected to be of type []byte. If the signature was created
+// using an RSA based algorithm, then the public key is expected to be
+// of type *rsa.PublicKey.
+func (v *Verifier) Verify(key interface{}, algo Algorithm) error {
+	method, err := newSigningMethod(string(algo))
+	if err != nil {
+		return fmt.Errorf("no crypto implementation available for %q: %s", algo, err)
 	}
-	m, err := macerFromString(string(algo))
-	if err == nil {
-		return v.macVerify(m, pKey)
-	}
-	return fmt.Errorf("no crypto implementation available for %q: %s", algo, err)
-}
 
-func (v *verifier) macVerify(m macer, pKey crypto.PublicKey) error {
-	key, ok := pKey.([]byte)
-	if !ok {
-		return fmt.Errorf("public key for MAC verifying must be of type []byte")
-	}
-	signature, err := v.sigStringFn(v.header, v.headers, v.created, v.expires)
-	if err != nil {
-		return err
-	}
-	actualMAC, err := base64.StdEncoding.DecodeString(v.signature)
-	if err != nil {
-		return err
-	}
-	ok, err = m.Equal([]byte(signature), actualMAC, key)
-	if err != nil {
-		return err
-	} else if !ok {
-		return fmt.Errorf("invalid http signature")
-	}
-	return nil
-}
-
-func (v *verifier) asymmVerify(s signer, pKey crypto.PublicKey) error {
-	toHash, err := v.sigStringFn(v.header, v.headers, v.created, v.expires)
+	data, err := v.sigStringFn(v.header, v.headers, v.created, v.expires)
 	if err != nil {
 		return err
 	}
@@ -104,7 +116,7 @@ func (v *verifier) asymmVerify(s signer, pKey crypto.PublicKey) error {
 	if err != nil {
 		return err
 	}
-	err = s.Verify(pKey, []byte(toHash), signature)
+	err = method.Verify(key, []byte(data), signature)
 	if err != nil {
 		return err
 	}
