@@ -58,7 +58,7 @@ type Signer struct {
 	expires      int64
 }
 
-// NewHTTPSigner creates a new Signer with the provided algorithm preferences to
+// NewSigner creates a new Signer with the provided algorithm preferences to
 // make HTTP signatures. Only the first available algorithm will be used, which
 // is returned by this function along with the Signer. If none of the preferred
 // algorithms were available, then the default algorithm is used. The headers
@@ -72,22 +72,19 @@ type Signer struct {
 //
 // An error is returned if an unknown or a known cryptographically insecure
 // Algorithm is provided.
-func NewHTTPSigner(
+func NewSigner(
 	prefs []Algorithm,
 	dAlgo DigestAlgorithm,
 	headers []string,
 	scheme SignatureScheme,
 	expiresIn int64,
 ) (*Signer, Algorithm, error) {
-	for _, pref := range prefs {
-		s, err := newSigner(pref, dAlgo, headers, scheme, expiresIn)
-		if err != nil {
-			continue
-		}
-		return s, pref, err
+	m, algo, err := lookupSigningMethod(prefs)
+	if err != nil {
+		return nil, algo, err
 	}
-	s, err := newSigner(defaultAlgorithm, dAlgo, headers, scheme, expiresIn)
-	return s, defaultAlgorithm, err
+	s := newSigner(m, dAlgo, headers, scheme, expiresIn)
+	return s, algo, nil
 }
 
 // NewwSSHSigner creates a new Signer using the specified ssh.Signer

@@ -148,24 +148,26 @@ func newSSHSigner(sshSigner ssh.Signer, algo Algorithm, dAlgo DigestAlgorithm, h
 	return a, nil
 }
 
-func newSigner(algo Algorithm, dAlgo DigestAlgorithm, headers []string, scheme SignatureScheme, expiresIn int64) (*Signer, error) {
+func newSigner(
+	m SigningMethod,
+	dAlgo DigestAlgorithm,
+	headers []string,
+	scheme SignatureScheme,
+	expiresIn int64,
+) *Signer {
 	var expires, created int64 = 0, 0
 	if expiresIn != 0 {
 		created = time.Now().Unix()
 		expires = created + expiresIn
 	}
 
-	method, err := newSigningMethod(string(algo))
-	if err != nil {
-		return nil, fmt.Errorf("no crypto implementation available for %q: %s", algo, err)
-	}
 	return &Signer{
-		method:       method,
+		method:       m,
 		dAlgo:        dAlgo,
 		headers:      headers,
 		targetHeader: scheme,
 		prefix:       scheme.authScheme(),
 		created:      created,
 		expires:      expires,
-	}, nil
+	}
 }

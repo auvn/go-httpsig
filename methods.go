@@ -13,14 +13,40 @@ var (
 	ErrInvalidSignature = errors.New("invalid signature")
 )
 
+var _customSigningMethods = make(map[Algorithm]SigningMethod)
+
 type SigningMethod interface {
 	Sign(key interface{}, data []byte) ([]byte, error)
 	Verify(key interface{}, data, signature []byte) error
 	String() string
 }
 
-func newSigningMethod(s string) (SigningMethod, error) {
-	s = strings.ToLower(s)
+func OverrideSigningMethod(algo Algorithm, s SigningMethod) {
+	if _, ok := _customSigningMethods[algo]; !ok {
+		panic("duplicated signing method")
+	}
+
+	_customSigningMethods[algo] = s
+}
+
+func lookupSigningMethod(alogs []Algorithm) (m SigningMethod, _ Algorithm, err error) {
+	for _, algo := range alogs {
+		m, err = newSigningMethod(algo)
+		if err == nil {
+			return m, algo, nil
+		}
+	}
+
+	m, err = newSigningMethod(defaultAlgorithm)
+	return m, defaultAlgorithm, err
+}
+
+func newSigningMethod(a Algorithm) (SigningMethod, error) {
+	if method, ok := _customSigningMethods[a]; ok {
+		return method, nil
+	}
+
+	s := strings.ToLower(string(a))
 	if strings.HasPrefix(s, hmacPrefix) {
 		algo := strings.TrimPrefix(s, hmacPrefix+"-")
 		hashFn, cHash, err := newAlgorithmConstructor(algo)
