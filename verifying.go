@@ -103,7 +103,7 @@ func (v *Verifier) KeyId() string {
 // using an RSA based algorithm, then the public key is expected to be
 // of type *rsa.PublicKey.
 func (v *Verifier) Verify(key interface{}, algo Algorithm) error {
-	method, err := newSigningMethod(string(algo))
+	method, err := newSigningMethod(algo)
 	if err != nil {
 		return fmt.Errorf("no crypto implementation available for %q: %s", algo, err)
 	}
