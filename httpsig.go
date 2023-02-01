@@ -148,7 +148,7 @@ func newSSHSigner(sshSigner ssh.Signer, algo Algorithm, dAlgo DigestAlgorithm, h
 	return a, nil
 }
 
-func newSigner(
+func NewSigner(
 	m SigningMethod,
 	dAlgo DigestAlgorithm,
 	headers []string,

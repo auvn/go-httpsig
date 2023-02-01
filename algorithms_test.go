@@ -343,7 +343,7 @@ func Test_newSigningMethod(t *testing.T) {
 		},
 	}
 	for _, test := range tests {
-		s, err := newSigningMethod(string(test.input))
+		s, err := newSigningMethod(test.input)
 		hasErr := err != nil
 		if hasErr != test.expectError {
 			if test.expectError {
@@ -468,7 +468,7 @@ func TestSignerSigns(t *testing.T) {
 		} else if err != nil {
 			t.Fatalf("%q: Failed setup: %s", test.name, err)
 		}
-		s, err := newSigningMethod(string(test.input))
+		s, err := newSigningMethod(test.input)
 		if err != nil {
 			t.Fatalf("%q: %s", test.name, err)
 		}
@@ -572,7 +572,7 @@ func TestSignerVerifies(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%q: %s", test.name, err)
 		}
-		s, err := newSigningMethod(string(test.input))
+		s, err := newSigningMethod(test.input)
 		if err != nil {
 			t.Fatalf("%q: %s", test.name, err)
 		}
@@ -735,7 +735,7 @@ func TestMACerSigns(t *testing.T) {
 		} else if err != nil {
 			t.Fatalf("%q: Failed setup: %s", test.name, err)
 		}
-		m, err := newSigningMethod(string(test.input))
+		m, err := newSigningMethod(test.input)
 		if err != nil {
 			t.Fatalf("%q: %s", test.name, err)
 		}
@@ -963,7 +963,7 @@ func TestMACerEquals(t *testing.T) {
 			}
 			actual = testHash.Sum(nil)
 		}
-		m, err := newSigningMethod(string(test.input))
+		m, err := newSigningMethod(test.input)
 		if err != nil {
 			t.Fatalf("%q: %s", test.name, err)
 		}
