@@ -22,7 +22,7 @@ type SigningMethod interface {
 }
 
 func OverrideSigningMethod(algo Algorithm, s SigningMethod) {
-	if _, ok := _customSigningMethods[algo]; !ok {
+	if _, ok := _customSigningMethods[algo]; ok {
 		panic("duplicated signing method")
 	}
 
